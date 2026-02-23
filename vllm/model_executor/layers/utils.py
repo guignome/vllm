@@ -248,11 +248,17 @@ def dispatch_cpu_unquantized_gemm(
         layer.cpu_linear = torch.nn.functional.linear
         return
 
-    N, K = layer.weight.size()
+    shape = tuple(layer.weight.size())
+    if len(shape) < 2:
+        raise ValueError("`layer.weight` must have at least 2 dimensions")
+    N, K = shape[-2], shape[-1]
     dtype = layer.weight.dtype
 
     if envs.VLLM_CPU_SGL_KERNEL and check_cpu_sgl_kernel(N, K, dtype):
-        packed_weight = torch.ops._C.convert_weight_packed(layer.weight)
+        weight_for_packing = (
+            layer.weight.reshape(-1, K) if layer.weight.dim() > 2 else layer.weight
+        )
+        packed_weight = torch.ops._C.convert_weight_packed(weight_for_packing)
         if getattr(layer, "bias", None) is not None:
             bias_f32 = layer.bias.to(torch.float32)
         else:
@@ -269,7 +275,10 @@ def dispatch_cpu_unquantized_gemm(
     ):
         try:
             origin_weight = layer.weight
-            handler = ops.create_onednn_mm(origin_weight.t(), 32)
+            origin_weight_2d = (
+                origin_weight.reshape(-1, K) if origin_weight.dim() > 2 else origin_weight
+            )
+            handler = ops.create_onednn_mm(origin_weight_2d.t(), 32)
             layer.cpu_linear = lambda x, weight, bias: ops.onednn_mm(handler, x, bias)
             if remove_weight:
                 layer.weight = torch.nn.Parameter(torch.empty(0), requires_grad=False)
